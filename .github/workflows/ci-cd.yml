@@ -1,17 +1,128 @@
-name: CI/CD
+name: CI/CD Pipeline (EC2)
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '22'
 
 jobs:
-  build:
+  ci:
+    name: Lint → Test → (Sonar optional)
     runs-on: ubuntu-latest
+    outputs:
+      sonar-status: ${{ steps.sonar_outcome.outcome || 'skipped' }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Run tests
+        env:
+          MONGO_URI_TEST: ${{ secrets.MONGO_URI_TEST }}
+        run: npm test
+
+      - name: SonarQube scan (optional)
+        id: sonar_outcome
+        if: ${{ secrets.SONAR_HOST_URL != '' && secrets.SONAR_TOKEN != '' }}
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          npm install -g sonar-scanner
+          sonar-scanner \
+            -Dsonar.projectKey=task-tracker-api \
+            -Dsonar.sources=. \
+            -Dsonar.host.url=$SONAR_HOST_URL \
+            -Dsonar.login=$SONAR_TOKEN
+
+  build_artifact:
+    name: Package artifact
+    runs-on: ubuntu-latest
+    needs: ci
+    if: success()
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Build minimal artifact
+        run: |
+          mkdir -p release
+          cp package*.json server.js -t release || true
+          cp -r routes models node_modules release || true
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          node-version: '22'
-      - run: npm install
-      - run: npm run lint
-      - run: npm test
+          name: app-release
+          path: release
+
+  deploy_ec2:
+    name: Deploy → EC2 via SSH
+    runs-on: ubuntu-latest
+    needs: build_artifact
+    if: ${{ secrets.EC2_HOST != '' && secrets.EC2_SSH_KEY != '' && secrets.EC2_USER != '' }}
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-release
+          path: release
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v0.1.9
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          timeout: 30m
+          script: |
+            set -e
+            mkdir -p /home/${{ secrets.EC2_USER }}/task-tracker
+            cd /home/${{ secrets.EC2_USER }}/task-tracker || exit 1
+            git pull origin main || true
+            npm ci --production
+            pm2 restart task-tracker || pm2 start server.js --name task-tracker
+            pm2 save
+
+  notify:
+    name: Slack notification
+    runs-on: ubuntu-latest
+    needs: [ci, build_artifact, deploy_ec2]
+    if: always()
+    steps:
+      - name: Send Slack message via webhook
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,commit,author,message
+          custom_payload: |
+            {
+              "text": ":rocket: *CI/CD result for ${{ github.repository }}*\\n• Event: `${{ github.event_name }}`\\n• Branch: `${{ github.ref_name }}`\\n• Result: `${{ job.status }}`\\n• Triggered by: `${{ github.actor }}`\\n"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Fallback message if no Slack webhook
+        if: ${{ secrets.SLACK_WEBHOOK_URL == '' }}
+        run: |
+          echo "No SLACK_WEBHOOK_URL configured. CI/CD finished with status: ${{ job.status }}"
