@@ -3,7 +3,6 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
 
 env:
   NODE_VERSION: '22'
@@ -168,3 +167,4 @@ jobs:
         if: ${{ secrets.SLACK_WEBHOOK_URL == '' }}
         run: |
           echo "No SLACK_WEBHOOK_URL configured. CI/CD finished with status: ${{ job.status }}"
+
