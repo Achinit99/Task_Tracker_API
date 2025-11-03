@@ -1,1 +1,155 @@
+name: CI/CD Pipeline (no Sonar)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  ci:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    outputs:
+      tests_passed: ${{ steps.tests.outcome }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Run tests
+        id: tests
+        env:
+          MONGO_URI_TEST: ${{ secrets.MONGO_URI_TEST }}
+        run: npm test --silent
+
+  package:
+    name: Build & Upload Artifact
+    runs-on: ubuntu-latest
+    needs: ci
+    if: ${{ needs.ci.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare release folder
+        run: |
+          rm -rf release
+          mkdir -p release
+          # Copy needed files (adjust as necessary)
+          cp package*.json server.js release/ || true
+          cp -r routes models release/ || true
+          # Install production dependencies into release/node_modules
+          pushd release
+          npm ci --only=production
+          popd
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: release
+
+  deploy_ec2:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: package
+    if: ${{ secrets.EC2_HOST != '' && secrets.EC2_SSH_KEY != '' && secrets.EC2_USER != '' }}
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-release
+          path: release
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v0.1.9
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_SSH_PORT || 22 }}
+          timeout: 20m
+          script: |
+            set -e
+            APP_DIR="/home/${{ secrets.EC2_USER }}/task-tracker"
+            mkdir -p "$APP_DIR"
+            # Option A: if you want to use git on server (ensure repo exists and ssh keys configured)
+            # cd "$APP_DIR"
+            # git pull origin main || true
+
+            # Option B: copy artifact contents into app dir (via here-doc)
+            # Remove existing files (be careful)
+            rm -rf "$APP_DIR"/*
+            mkdir -p "$APP_DIR"
+            # Write files from the artifact (we will stream them)
+            # On the runner, the release dir contains the app; use tar to send and extract on remote.
+          # Now transfer the release folder via base64 (fallback method if scp not allowed)
+      - name: Transfer release to EC2 (rsync over ssh)
+        if: ${{ secrets.EC2_USE_RSYNC == 'true' }}
+        run: |
+          echo "$EC2_PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          rsync -e "ssh -i private_key.pem -o StrictHostKeyChecking=no -p ${EC2_SSH_PORT:-22}" -avz --delete release/ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/home/${{ secrets.EC2_USER }}/task-tracker/
+        env:
+          EC2_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+
+      - name: Finalize deploy on EC2 (install & restart)
+        if: ${{ secrets.EC2_USE_RSYNC == 'true' }}
+        uses: appleboy/ssh-action@v0.1.9
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_SSH_PORT || 22 }}
+          script: |
+            set -e
+            cd /home/${{ secrets.EC2_USER }}/task-tracker
+            npm ci --production
+            pm2 restart task-tracker || pm2 start server.js --name task-tracker
+            pm2 save
+
+  notify:
+    name: Slack notification
+    runs-on: ubuntu-latest
+    needs: [ci, package, deploy_ec2]
+    if: always()
+    steps:
+      - name: Send Slack message
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,commit,author,message
+          custom_payload: |
+            {
+              "text": ":rocket: CI/CD *${{ github.repository }}* — result: `${{ job.status }}`\\nBranch: `${{ github.ref_name }}`\\nTriggered by: `${{ github.actor }}`"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Log summary (no Slack)
+        if: ${{ secrets.SLACK_WEBHOOK_URL == '' }}
+        run: |
+          echo "CI/CD finished. Slack webhook not configured."
+
 
