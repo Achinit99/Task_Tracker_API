@@ -10,7 +10,7 @@ env:
 jobs:
   ci:
     name: Lint → Test → (Sonar optional)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       sonar-status: ${{ steps.sonar_outcome.outcome || 'skipped' }}
     steps:
@@ -57,7 +57,7 @@ jobs:
 
   build_artifact:
     name: Package artifact
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: ci
     if: success()
     steps:
@@ -75,7 +75,7 @@ jobs:
 
   deploy_ec2:
     name: Deploy → EC2 via SSH
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: build_artifact
     if: ${{ secrets.EC2_HOST != '' && secrets.EC2_SSH_KEY != '' && secrets.EC2_USER != '' }}
     steps:
@@ -111,7 +111,7 @@ jobs:
 
   deploy_render:
     name: Trigger deploy on Render (optional)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: build_artifact
     if: ${{ secrets.RENDER_SERVICE_ID != '' && secrets.RENDER_API_KEY != '' }}
     steps:
@@ -129,7 +129,7 @@ jobs:
 
   deploy_railway:
     name: Deploy to Railway (optional)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: build_artifact
     if: ${{ secrets.RAILWAY_API_KEY != '' }}
     steps:
@@ -146,7 +146,7 @@ jobs:
 
   notify:
     name: Slack notification
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [ci, build_artifact, deploy_ec2, deploy_render, deploy_railway]
     if: always()
     steps:
@@ -167,4 +167,5 @@ jobs:
         if: ${{ secrets.SLACK_WEBHOOK_URL == '' }}
         run: |
           echo "No SLACK_WEBHOOK_URL configured. CI/CD finished with status: ${{ job.status }}"
+
 
