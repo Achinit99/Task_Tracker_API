@@ -2,7 +2,7 @@ name: CI/CD Pipeline (no Sonar)
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
 
 env:
@@ -151,6 +151,7 @@ jobs:
         if: ${{ secrets.SLACK_WEBHOOK_URL == '' }}
         run: |
           echo "CI/CD finished. Slack webhook not configured."
+
 
 
 
