@@ -1,9 +1,8 @@
-name: CI/CD Pipeline (EC2)
+name: CI/CD Pipeline (EC2) - automatic only
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
 
 env:
   NODE_VERSION: '22'
